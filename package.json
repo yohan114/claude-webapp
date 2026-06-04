@@ -1,0 +1,16 @@
+{
+  "name": "job-costing-webapp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js",
+    "import": "node server/import-excel.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "express": "^5.2.1",
+    "xlsx": "^0.18.5"
+  }
+}
