@@ -20,6 +20,20 @@ function likeWhere(fields, q) {
   return { sql, params: fields.map(() => `%${q}%`) };
 }
 
+// Correlated subquery: auto-match a row (alias `t`, columns vehicle & date) to a job
+// whose vehicle matches and whose date window (start .. end-or-today) contains the row date.
+const JOB_MATCH = (t) => `(SELECT j.job_no FROM jobs j
+  WHERE j.vehicle = ${t}.vehicle
+    AND ${t}.date IS NOT NULL AND ${t}.date != ''
+    AND j.start_date IS NOT NULL
+    AND ${t}.date >= j.start_date
+    AND ${t}.date <= COALESCE(NULLIF(j.end_date,''), date('now'))
+  ORDER BY j.start_date DESC LIMIT 1)`;
+
+// Correlated subquery: latest price for a row's description (alias `t`).
+const PRICE_MATCH = (t) => `(SELECT p.current_price FROM prices p
+  WHERE p.description = ${t}.description ORDER BY p.id DESC LIMIT 1)`;
+
 // ============================================================ DASHBOARD
 app.get('/api/dashboard', (req, res) => {
   try {
@@ -130,15 +144,20 @@ app.delete('/api/jobs/:id', (req, res) => {
 // ============================================================ MATERIAL ISSUES
 app.get('/api/materials', (req, res) => {
   try {
-    const { q, category } = req.query;
-    let sql = 'SELECT * FROM material_issues';
+    const { q, category, used } = req.query;
+    let sql = `SELECT mi.*, ${JOB_MATCH('mi')} AS job_no, ${PRICE_MATCH('mi')} AS unit_price
+      FROM material_issues mi`;
     const params = [];
     const clauses = [];
-    if (category) { clauses.push('category = ?'); params.push(category); }
-    if (q) { clauses.push('(description LIKE ? OR vehicle LIKE ? OR mr_no LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
+    if (category) { clauses.push('mi.category = ?'); params.push(category); }
+    if (q) { clauses.push('(mi.description LIKE ? OR mi.vehicle LIKE ? OR mi.mr_no LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
     if (clauses.length) sql += ' WHERE ' + clauses.join(' AND ');
-    sql += ' ORDER BY id DESC LIMIT 3000';
-    ok(res, db.prepare(sql).all(...params));
+    sql += ' ORDER BY mi.id DESC LIMIT 3000';
+    let rows = db.prepare(sql).all(...params);
+    rows = rows.map((r) => ({ ...r, line_total: r.unit_price != null && r.qty != null ? r.unit_price * r.qty : null }));
+    if (used === 'yes') rows = rows.filter((r) => r.job_no);
+    if (used === 'no') rows = rows.filter((r) => !r.job_no);
+    ok(res, rows);
   } catch (e) { fail(res, e); }
 });
 
@@ -180,14 +199,14 @@ function manHours(hours, mechanic) {
 app.get('/api/worklog', (req, res) => {
   try {
     const { q, from, to } = req.query;
-    let sql = 'SELECT * FROM daily_work';
+    let sql = `SELECT dw.*, ${JOB_MATCH('dw')} AS job_no FROM daily_work dw`;
     const params = [];
     const clauses = [];
-    if (q) { clauses.push('(vehicle LIKE ? OR description LIKE ? OR mechanic LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
-    if (from) { clauses.push('date >= ?'); params.push(from); }
-    if (to) { clauses.push('date <= ?'); params.push(to); }
+    if (q) { clauses.push('(dw.vehicle LIKE ? OR dw.description LIKE ? OR dw.mechanic LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
+    if (from) { clauses.push('dw.date >= ?'); params.push(from); }
+    if (to) { clauses.push('dw.date <= ?'); params.push(to); }
     if (clauses.length) sql += ' WHERE ' + clauses.join(' AND ');
-    sql += ' ORDER BY date DESC, id DESC LIMIT 3000';
+    sql += ' ORDER BY dw.date DESC, dw.id DESC LIMIT 3000';
     ok(res, db.prepare(sql).all(...params));
   } catch (e) { fail(res, e); }
 });
@@ -270,7 +289,7 @@ app.get('/api/report/job/:jobNo', (req, res) => {
     const end = job.end_date || new Date().toISOString().slice(0, 10);
 
     const materials = db.prepare(`SELECT * FROM material_issues
-      WHERE vehicle = ? AND (date IS NULL OR (date >= ? AND date <= ?)) ORDER BY date`).all(job.vehicle, start, end);
+      WHERE vehicle = ? AND date IS NOT NULL AND date != '' AND date >= ? AND date <= ? ORDER BY date`).all(job.vehicle, start, end);
 
     // price lookup by exact-ish description
     const priceFor = db.prepare('SELECT current_price FROM prices WHERE description = ? ORDER BY id DESC LIMIT 1');
@@ -284,10 +303,11 @@ app.get('/api/report/job/:jobNo', (req, res) => {
     });
 
     const work = db.prepare(`SELECT * FROM daily_work
-      WHERE vehicle = ? AND (date IS NULL OR (date >= ? AND date <= ?)) ORDER BY date`).all(job.vehicle, start, end);
+      WHERE vehicle = ? AND date IS NOT NULL AND date != '' AND date >= ? AND date <= ? ORDER BY date`).all(job.vehicle, start, end);
     const labourHours = work.reduce((s, w) => s + (w.man_hours || 0), 0);
 
-    ok(res, { job, materials: pricedMaterials, work, summary: { materialCost, labourHours, lines: pricedMaterials.length } });
+    ok(res, { job, materials: pricedMaterials, work,
+      summary: { materialCost, labourHours, lines: pricedMaterials.length, start, end } });
   } catch (e) { fail(res, e); }
 });
 

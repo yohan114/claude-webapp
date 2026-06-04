@@ -13,7 +13,9 @@ initSchema();
 const wb = xlsx.readFile(file, { cellDates: true });
 
 // helpers -----------------------------------------------------------------
-const sheet = (name) => (wb.Sheets[name] ? xlsx.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: null }) : []);
+// raw:true keeps date cells as JS Date objects (cellDates:true above), so iso() parses
+// them correctly. raw:false reformats them into locale strings that misparse (year 2001 bug).
+const sheet = (name) => (wb.Sheets[name] ? xlsx.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: null }) : []);
 const iso = (v) => {
   if (!v) return null;
   const d = new Date(v);
@@ -76,15 +78,37 @@ const insMI = db.prepare(`INSERT INTO material_issues
   (category, mr_no, date, description, unit, type, qty, vehicle, site, remarks)
   VALUES (?,?,?,?,?,?,?,?,?,?)`);
 
-function importMI(sheetName, category, map, headerMatch) {
+// Map columns by HEADER NAME (robust to leading-empty-column drift between sheets).
+// `spec` maps a db field → list of accepted header-name regexes.
+function importMI(sheetName, category, spec) {
   const rows = sheet(sheetName);
-  const hIdx = rows.findIndex((r) => r && r.some((c) => headerMatch.test(String(c))));
+  // header row = the one matching the most of our header patterns
+  const allPats = Object.values(spec).flat();
+  let hIdx = -1, best = 0;
+  rows.forEach((r, i) => {
+    if (!r) return;
+    const score = allPats.filter((p) => r.some((c) => c != null && p.test(String(c).trim()))).length;
+    if (score > best) { best = score; hIdx = i; }
+  });
   if (hIdx < 0) return 0;
+  const header = rows[hIdx].map((c) => (c == null ? '' : String(c).trim()));
+  // resolve each field to a column index
+  const colOf = {};
+  for (const [field, pats] of Object.entries(spec)) {
+    colOf[field] = header.findIndex((h) => pats.some((p) => p.test(h)));
+  }
+  const isDate = new Set(['date']);
+  const isNum = new Set(['qty']);
   let n = 0;
   for (let i = hIdx + 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || r.every((c) => c === null)) continue;
-    const rec = map(r);
+    const rec = {};
+    for (const field of Object.keys(spec)) {
+      const idx = colOf[field];
+      const v = idx >= 0 ? r[idx] : null;
+      rec[field] = isDate.has(field) ? iso(v) : isNum.has(field) ? num(v) : str(v);
+    }
     if (!rec.description && !rec.vehicle) continue;
     insMI.run(category, rec.mr_no || null, rec.date || null, rec.description || null,
       rec.unit || null, rec.type || null, rec.qty ?? null, rec.vehicle || null, rec.site || null, rec.remarks || null);
@@ -93,35 +117,24 @@ function importMI(sheetName, category, map, headerMatch) {
   return n;
 }
 
-// Battery RQ,IS: HEAD, MR No., Date, Description, Unit, Qty, Vehicle, Remark
-console.log('Battery:', importMI('Battery RQ,IS', 'Battery', (r) => ({
-  mr_no: str(r[1]), date: iso(r[2]), description: str(r[3]), unit: str(r[4]), qty: num(r[5]), vehicle: str(r[6]), site: str(r[7]),
-}), /MR No/i));
-
-// Filter IS: HEAD, Date, Vehical Number, Description, Qty
-console.log('Filter:', importMI('Filter IS', 'Filter', (r) => ({
-  date: iso(r[1]), vehicle: str(r[2]), description: str(r[3]), qty: num(r[4]),
-}), /Vehical|Vehicle/i));
-
-// Lubricant IS: HEAD, Date, Vehicle No, Description, Type, Qty
-console.log('Lubricant:', importMI('Lubricant IS', 'Lubricant', (r) => ({
-  date: iso(r[1]), vehicle: str(r[2]), description: str(r[3]), type: str(r[4]), qty: num(r[5]),
-}), /Vehicle No/i));
-
-// General Items IS: a, Date, Description, Qty, Vehicle No
-console.log('General:', importMI('General Items IS', 'General', (r) => ({
-  date: iso(r[1]), description: str(r[2]), qty: num(r[3]), vehicle: str(r[4]),
-}), /Description/i));
-
-// Tyre Mrn RQ IS: _, MRN No, Date, Description, Qty, Vehicle
-console.log('Tyre:', importMI('Tyre Mrn RQ IS', 'Tyre', (r) => ({
-  mr_no: str(r[1]), date: iso(r[2]), description: str(r[3]), qty: num(r[4]), vehicle: str(r[5]),
-}), /MRN No/i));
-
-// MRN Items RQ IS: _, MRN, Date, Description, Qty, Vehicle No
-console.log('MRN:', importMI('MRN Items RQ IS', 'MRN', (r) => ({
-  mr_no: str(r[1]), date: iso(r[2]), description: str(r[3]), qty: num(r[4]), vehicle: str(r[5]),
-}), /MRN/i));
+console.log('Battery:', importMI('Battery RQ,IS', 'Battery', {
+  mr_no: [/^MR No/i], date: [/^Date/i], description: [/^Desc/i], unit: [/^Unit/i], qty: [/^Qty/i], vehicle: [/Vehicle|Equipment/i], site: [/^Remark/i],
+}));
+console.log('Filter:', importMI('Filter IS', 'Filter', {
+  date: [/^Date/i], vehicle: [/Vehical|Vehicle/i], description: [/^Desc/i], qty: [/^Qty/i],
+}));
+console.log('Lubricant:', importMI('Lubricant IS', 'Lubricant', {
+  date: [/^Date/i], vehicle: [/Vehicle/i], description: [/^Desc/i], type: [/^Type/i], qty: [/^Qty/i],
+}));
+console.log('General:', importMI('General Items IS', 'General', {
+  date: [/^Date/i], description: [/^Desc/i], qty: [/^Qty/i], vehicle: [/Vehicle/i],
+}));
+console.log('Tyre:', importMI('Tyre Mrn RQ IS', 'Tyre', {
+  mr_no: [/^MRN/i], date: [/^Date/i], description: [/^Desc/i], qty: [/^Qty/i], vehicle: [/Vehicle/i],
+}));
+console.log('MRN:', importMI('MRN Items RQ IS', 'MRN', {
+  mr_no: [/^MRN/i], date: [/^Date/i], description: [/^Desc/i], qty: [/^Qty/i], vehicle: [/Vehicle/i],
+}));
 
 // Daily Work done ---------------------------------------------------------
 (() => {

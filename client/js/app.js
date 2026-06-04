@@ -236,6 +236,11 @@ views.materials = async () => {
   view.innerHTML = `<div class="toolbar">
     ${MAT_CATS.map((c, i) => `<div class="chip ${i === 0 ? 'active' : ''}" data-cat="${c}">${c}</div>`).join('')}
     <div class="grow"></div>
+    <select id="used" class="search" style="width:160px">
+      <option value="">All materials</option>
+      <option value="yes">✔ Used (in a job)</option>
+      <option value="no">○ Not used</option>
+    </select>
     <button class="btn" id="add">+ Issue Material</button>
   </div><div id="tbl"><div class="loading">Loading…</div></div>`;
   let cat = 'Battery';
@@ -245,9 +250,12 @@ views.materials = async () => {
     { key: 'mr_no', label: 'MR No' },
     { key: 'description', label: 'Description' },
     { key: 'qty', label: 'Qty', render: num },
-    { key: 'unit', label: 'Unit' },
+    { key: 'unit_price', label: 'Unit Price', render: money },
+    { key: 'line_total', label: 'Total', render: money },
     { key: 'vehicle', label: 'Vehicle', render: (v) => v ? `<span class="link" data-veh="${esc(v)}">${esc(v)}</span>` : '' },
-    { key: 'site', label: 'Site' },
+    { key: 'job_no', label: 'Used in Job', render: (v) => v
+        ? `<span class="badge closed" title="Assigned to job by date range">✔</span> <span class="link" data-rep="${esc(v)}">${esc(v)}</span>`
+        : '<span class="badge open" title="Not within any job date range">○ unused</span>' },
   ];
   const fields = () => [
     { name: 'category', label: 'Category', type: 'select', options: MAT_CATS, default: cat },
@@ -260,11 +268,13 @@ views.materials = async () => {
     { name: 'remarks', label: 'Remarks / Site', full: true },
   ];
   async function load() {
-    const rows = await api.get(`/api/materials?category=${cat}&q=${encodeURIComponent(state.search)}`);
+    const used = view.querySelector('#used').value;
+    const rows = await api.get(`/api/materials?category=${cat}&used=${used}&q=${encodeURIComponent(state.search)}`);
     const draw = () => {
       tbl.innerHTML = renderTable(cols, rows, { actions: true });
       attachSort(tbl, cols, rows, draw);
       tbl.querySelectorAll('[data-veh]').forEach((a) => a.onclick = () => openVehicle(a.dataset.veh));
+      tbl.querySelectorAll('[data-rep]').forEach((a) => a.onclick = () => openJobReport(a.dataset.rep));
       tbl.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => {
         const r = rows[+b.dataset.edit];
         modal({ title: 'Edit Material', fields: fields(), values: r, onSave: async (data) => { await api.send('/api/materials/' + r.id, 'PUT', data); toast('Saved', 'ok'); load(); } });
@@ -276,6 +286,7 @@ views.materials = async () => {
     };
     draw();
   }
+  view.querySelector('#used').onchange = load;
   view.querySelectorAll('.chip').forEach((c) => c.onclick = () => {
     view.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
     c.classList.add('active'); cat = c.dataset.cat; load();
@@ -302,6 +313,7 @@ views.worklog = async () => {
     { key: 'mechanic', label: 'Mechanic(s)' },
     { key: 'hours', label: 'Hrs', render: num },
     { key: 'man_hours', label: 'Man-Hrs', render: num },
+    { key: 'job_no', label: 'Job', render: (v) => v ? `<span class="link" data-rep="${esc(v)}">${esc(v)}</span>` : '<span class="muted">—</span>' },
   ];
   const fields = [
     { name: 'date', label: 'Date', type: 'date', default: new Date().toISOString().slice(0, 10) },
@@ -318,6 +330,7 @@ views.worklog = async () => {
       tbl.innerHTML = renderTable(cols, rows, { actions: true });
       attachSort(tbl, cols, rows, draw);
       tbl.querySelectorAll('[data-veh]').forEach((a) => a.onclick = () => openVehicle(a.dataset.veh));
+      tbl.querySelectorAll('[data-rep]').forEach((a) => a.onclick = () => openJobReport(a.dataset.rep));
       tbl.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => {
         const r = rows[+b.dataset.edit];
         modal({ title: 'Edit Work Log', fields, values: r, onSave: async (data) => { await api.send('/api/worklog/' + r.id, 'PUT', data); toast('Saved', 'ok'); load(); } });
