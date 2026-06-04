@@ -29,9 +29,25 @@ const num = (v) => {
 const str = (v) => (v === null || v === undefined ? null : String(v).trim() || null);
 
 // wipe so re-imports are idempotent
-for (const t of ['fleet', 'jobs', 'material_issues', 'daily_work', 'prices', 'received_items']) {
+for (const t of ['fleet', 'jobs', 'material_issues', 'daily_work', 'prices', 'received_items', 'labour_rates']) {
   db.exec(`DELETE FROM ${t}`);
 }
+
+// Labour hour price -------------------------------------------------------
+(() => {
+  const rows = sheet('Labour hour price');
+  const stmt = db.prepare('INSERT OR IGNORE INTO labour_rates (name, hour_price) VALUES (?,?)');
+  let n = 0;
+  for (const r of rows) {
+    // sheet has a leading empty column; name/price live in cols B/C (idx 1/2)
+    const cells = r.filter((c) => c !== null);
+    if (cells.length < 2) continue;
+    const name = str(cells[0]); const price = num(cells[1]);
+    if (!name || /labour name/i.test(name) || price == null) continue;
+    stmt.run(name, price); n++;
+  }
+  console.log(`Labour rates: ${n}`);
+})();
 
 // Fleet -------------------------------------------------------------------
 (() => {

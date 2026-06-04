@@ -34,6 +34,82 @@ const JOB_MATCH = (t) => `(SELECT j.job_no FROM jobs j
 const PRICE_MATCH = (t) => `(SELECT p.current_price FROM prices p
   WHERE p.description = ${t}.description ORDER BY p.id DESC LIMIT 1)`;
 
+// ---------------------------------------------------------------- labour
+const normName = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+function lev(a, b) {
+  const m = a.length, n = b.length;
+  if (!m) return n; if (!n) return m;
+  const d = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[m][n];
+}
+// split a "Mechanic" cell into individual people (commas / dots / slashes separate them)
+const splitMechanics = (field) => String(field || '').split(/[,/.]+/).map((s) => s.trim()).filter(Boolean);
+
+// Build alias table from labour_rates; "X/Y" rate names yield multiple aliases.
+function loadAliases() {
+  const rows = db.prepare('SELECT name, hour_price FROM labour_rates').all();
+  const aliases = [];
+  for (const r of rows) for (const part of r.name.split('/')) {
+    const key = normName(part); if (key) aliases.push({ key, name: r.name, rate: r.hour_price });
+  }
+  return aliases;
+}
+// Resolve a single token to a canonical rate via exact-then-fuzzy match.
+function matchOne(token, aliases) {
+  const k = normName(token);
+  if (!k) return null;
+  let best = null, bestD = 99;
+  for (const a of aliases) {
+    if (a.key === k) return a;
+    const d = lev(k, a.key);
+    if (d < bestD) { bestD = d; best = a; }
+  }
+  const tol = k.length <= 4 ? 1 : 2;       // shorter names need a tighter tolerance
+  return bestD <= tol ? best : null;
+}
+// Expand a "Mechanic" cell into a list of resolved people. Tries the whole token
+// first (so "Vinod M" stays one person), then falls back to splitting on spaces
+// (so "Buddika Viboda" / "Nuwan Nimesh" become two people).
+function resolvePeople(field, aliases) {
+  const people = [];
+  for (const tok of splitMechanics(field)) {
+    const whole = matchOne(tok, aliases);
+    if (whole) { people.push({ name: whole.name, rate: whole.rate, matched: true }); continue; }
+    const parts = tok.split(/\s+/).filter(Boolean);
+    if (parts.length > 1) {
+      const resolved = parts.map((p) => matchOne(p, aliases));
+      if (resolved.some(Boolean)) {
+        resolved.forEach((r, i) => people.push(r ? { name: r.name, rate: r.rate, matched: true }
+          : { name: parts[i], rate: 0, matched: false }));
+        continue;
+      }
+    }
+    people.push({ name: tok, rate: 0, matched: false });
+  }
+  return people;
+}
+// Compute labour cost + per-mechanic breakdown for a set of daily_work rows.
+// Rule (user choice): each listed mechanic is credited the full H hours of the row.
+function computeLabour(workRows, aliases) {
+  let cost = 0, hours = 0, unmatched = 0;
+  const perMech = new Map();
+  for (const w of workRows) {
+    const h = Number(w.hours) || 0;
+    if (!h) continue;
+    for (const p of resolvePeople(w.mechanic, aliases)) {
+      const lineCost = h * p.rate;
+      hours += h; cost += lineCost;
+      if (!p.matched) unmatched += h;
+      const cur = perMech.get(p.name) || { name: p.name, hours: 0, cost: 0, rate: p.rate, matched: p.matched };
+      cur.hours += h; cur.cost += lineCost; perMech.set(p.name, cur);
+    }
+  }
+  return { cost, hours, unmatchedHours: unmatched, perMechanic: [...perMech.values()].sort((x, y) => y.cost - x.cost) };
+}
+
 // ============================================================ DASHBOARD
 app.get('/api/dashboard', (req, res) => {
   try {
@@ -240,6 +316,62 @@ app.delete('/api/worklog/:id', (req, res) => {
   catch (e) { fail(res, e); }
 });
 
+// ============================================================ LABOUR RATES
+app.get('/api/labour/rates', (req, res) => {
+  try { ok(res, db.prepare('SELECT * FROM labour_rates ORDER BY name').all()); } catch (e) { fail(res, e); }
+});
+app.post('/api/labour/rates', (req, res) => {
+  try {
+    const { name, hour_price } = req.body;
+    const info = db.prepare('INSERT INTO labour_rates (name, hour_price) VALUES (?,?)').run(name, hour_price ?? null);
+    ok(res, db.prepare('SELECT * FROM labour_rates WHERE id = ?').get(info.lastInsertRowid));
+  } catch (e) { fail(res, e); }
+});
+app.put('/api/labour/rates/:id', (req, res) => {
+  try {
+    const { name, hour_price } = req.body;
+    db.prepare('UPDATE labour_rates SET name=?, hour_price=? WHERE id=?').run(name, hour_price ?? null, req.params.id);
+    ok(res, db.prepare('SELECT * FROM labour_rates WHERE id = ?').get(req.params.id));
+  } catch (e) { fail(res, e); }
+});
+app.delete('/api/labour/rates/:id', (req, res) => {
+  try { db.prepare('DELETE FROM labour_rates WHERE id = ?').run(req.params.id); ok(res, { ok: true }); }
+  catch (e) { fail(res, e); }
+});
+
+// Per-labourer monthly hours + cost matrix
+app.get('/api/report/labour-cost', (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const aliases = loadAliases();
+    let sql = "SELECT date, hours, mechanic FROM daily_work WHERE date IS NOT NULL AND date != '' AND hours IS NOT NULL";
+    const params = [];
+    if (from) { sql += ' AND date >= ?'; params.push(from); }
+    if (to) { sql += ' AND date <= ?'; params.push(to); }
+    const rows = db.prepare(sql).all(...params);
+
+    const months = new Set();
+    const byMech = new Map(); // name -> { name, rate, matched, total:{hours,cost}, months:{ 'YYYY-MM': {hours,cost} } }
+    for (const w of rows) {
+      const month = String(w.date).slice(0, 7);
+      const h = Number(w.hours) || 0; if (!h) continue;
+      months.add(month);
+      for (const p of resolvePeople(w.mechanic, aliases)) {
+        const cost = h * p.rate;
+        let e = byMech.get(p.name);
+        if (!e) { e = { name: p.name, rate: p.rate, matched: p.matched, total: { hours: 0, cost: 0 }, months: {} }; byMech.set(p.name, e); }
+        e.total.hours += h; e.total.cost += cost;
+        const m = e.months[month] || { hours: 0, cost: 0 };
+        m.hours += h; m.cost += cost; e.months[month] = m;
+      }
+    }
+    const monthList = [...months].sort();
+    const labourers = [...byMech.values()].sort((a, b) => b.total.cost - a.total.cost);
+    const grand = labourers.reduce((s, l) => ({ hours: s.hours + l.total.hours, cost: s.cost + l.total.cost }), { hours: 0, cost: 0 });
+    ok(res, { months: monthList, labourers, grand });
+  } catch (e) { fail(res, e); }
+});
+
 // ============================================================ PRICES
 app.get('/api/prices', (req, res) => {
   try {
@@ -306,8 +438,18 @@ app.get('/api/report/job/:jobNo', (req, res) => {
       WHERE vehicle = ? AND date IS NOT NULL AND date != '' AND date >= ? AND date <= ? ORDER BY date`).all(job.vehicle, start, end);
     const labourHours = work.reduce((s, w) => s + (w.man_hours || 0), 0);
 
+    // labour cost via fuzzy rate matching
+    const labour = computeLabour(work, loadAliases());
+
     ok(res, { job, materials: pricedMaterials, work,
-      summary: { materialCost, labourHours, lines: pricedMaterials.length, start, end } });
+      labour: labour.perMechanic,
+      summary: {
+        materialCost, labourHours,
+        labourCost: labour.cost,
+        labourUnmatchedHours: labour.unmatchedHours,
+        totalCost: materialCost + labour.cost,
+        lines: pricedMaterials.length, start, end,
+      } });
   } catch (e) { fail(res, e); }
 });
 

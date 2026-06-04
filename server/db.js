@@ -95,6 +95,12 @@ export function initSchema() {
       mr_no         TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS labour_rates (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT UNIQUE,
+      hour_price  REAL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_jobs_vehicle ON jobs(vehicle);
     CREATE INDEX IF NOT EXISTS idx_mi_vehicle  ON material_issues(vehicle);
     CREATE INDEX IF NOT EXISTS idx_mi_category ON material_issues(category);

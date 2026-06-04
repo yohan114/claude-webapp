@@ -350,6 +350,87 @@ views.worklog = async () => {
   load();
 };
 
+// ---------------- Labour Cost
+const MONTH_LABEL = (m) => { const [y, mo] = m.split('-'); return new Date(y, mo - 1).toLocaleString('en', { month: 'short' }) + ' ' + y.slice(2); };
+views.labour = async () => {
+  view.innerHTML = `
+    <div class="toolbar">
+      <input id="from" type="date" class="search" style="width:160px" title="From" />
+      <input id="to" type="date" class="search" style="width:160px" title="To" />
+      <div class="chip active" data-mode="cost">Show Cost</div>
+      <div class="chip" data-mode="hours">Show Hours</div>
+      <div class="grow"></div>
+      <button class="btn ghost" id="rates">⚙ Hourly Rates</button>
+    </div>
+    <div id="summary" class="stat-grid"></div>
+    <div class="panel"><h2>Monthly Labour — per labourer</h2><div id="matrix" class="loading">Loading…</div></div>`;
+  let mode = 'cost';
+  async function load() {
+    const from = view.querySelector('#from').value, to = view.querySelector('#to').value;
+    const d = await api.get(`/api/report/labour-cost?from=${from}&to=${to}`);
+    view.querySelector('#summary').innerHTML = `
+      <div class="stat"><div class="v">${money(d.grand.cost)}</div><div class="l">Total Labour Cost</div></div>
+      <div class="stat"><div class="v">${num(Math.round(d.grand.hours))}</div><div class="l">Total Man-Hours</div></div>
+      <div class="stat"><div class="v">${d.labourers.filter((l) => l.matched).length}</div><div class="l">Labourers</div></div>`;
+    const cell = (o) => o ? (mode === 'cost' ? money(o.cost) : num(Math.round(o.hours))) : '<span class="muted">·</span>';
+    const head = '<th>Labourer</th><th>Rate</th>' + d.months.map((m) => `<th>${MONTH_LABEL(m)}</th>`).join('') + '<th>Total</th>';
+    const body = d.labourers.map((l) => {
+      const flag = l.matched ? '' : ' <span class="badge open" title="No matching rate — add one">no rate</span>';
+      const tds = d.months.map((m) => `<td>${cell(l.months[m])}</td>`).join('');
+      const tot = mode === 'cost' ? money(l.total.cost) : num(Math.round(l.total.hours));
+      return `<tr><td>${esc(l.name)}${flag}</td><td>${l.rate ? money(l.rate) : '—'}</td>${tds}<td><b>${tot}</b></td></tr>`;
+    }).join('');
+    const grandCells = d.months.map((m) => {
+      const v = d.labourers.reduce((s, l) => ({ hours: s.hours + (l.months[m]?.hours || 0), cost: s.cost + (l.months[m]?.cost || 0) }), { hours: 0, cost: 0 });
+      return `<td><b>${mode === 'cost' ? money(v.cost) : num(Math.round(v.hours))}</b></td>`;
+    }).join('');
+    const grandTot = mode === 'cost' ? money(d.grand.cost) : num(Math.round(d.grand.hours));
+    view.querySelector('#matrix').outerHTML = `<div id="matrix"><div class="table-wrap"><table>
+      <thead><tr>${head}</tr></thead><tbody>${body}
+      <tr style="background:var(--panel-2)"><td><b>GRAND TOTAL</b></td><td></td>${grandCells}<td><b>${grandTot}</b></td></tr>
+      </tbody></table></div></div>`;
+  }
+  view.querySelectorAll('.chip').forEach((c) => c.onclick = () => {
+    view.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+    c.classList.add('active'); mode = c.dataset.mode; load();
+  });
+  view.querySelector('#from').onchange = load;
+  view.querySelector('#to').onchange = load;
+  view.querySelector('#rates').onclick = openRates;
+  load();
+};
+
+async function openRates() {
+  const rows = await api.get('/api/labour/rates');
+  const root = document.getElementById('modal-root');
+  const list = rows.map((r) => `<tr><td>${esc(r.name)}</td><td>${money(r.hour_price)}</td>
+    <td class="actions"><button class="btn ghost sm" data-edit="${r.id}" data-n="${esc(r.name)}" data-p="${r.hour_price}">Edit</button>
+    <button class="btn danger sm" data-del="${r.id}">Del</button></td></tr>`).join('');
+  const bg = el(`<div class="modal-bg"><div class="modal" style="width:520px">
+    <div class="modal-head"><h3>👷 Hourly Rates</h3><button class="close">×</button></div>
+    <div class="modal-body" style="display:block">
+      <button class="btn sm" id="addrate">+ Add Labourer</button>
+      <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Name</th><th>Hour Price</th><th></th></tr></thead><tbody>${list}</tbody></table></div>
+    </div></div></div>`);
+  const close = () => root.innerHTML = '';
+  bg.querySelector('.close').onclick = close;
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+  const rateForm = (vals = {}) => modal({
+    title: vals.id ? 'Edit Rate' : 'Add Labourer',
+    fields: [{ name: 'name', label: 'Labourer Name', full: true }, { name: 'hour_price', label: 'Hour Price (Rs)', type: 'number', numeric: true }],
+    values: vals,
+    onSave: async (data) => {
+      if (vals.id) await api.send('/api/labour/rates/' + vals.id, 'PUT', data);
+      else await api.send('/api/labour/rates', 'POST', data);
+      toast('Saved', 'ok'); openRates();
+    },
+  });
+  bg.querySelector('#addrate').onclick = () => rateForm();
+  bg.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => rateForm({ id: b.dataset.edit, name: b.dataset.n, hour_price: b.dataset.p }));
+  bg.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirmDelete('this rate', async () => { await api.send('/api/labour/rates/' + b.dataset.del, 'DELETE'); toast('Deleted', 'ok'); openRates(); }));
+  root.innerHTML = ''; root.appendChild(bg);
+}
+
 // ---------------- Prices
 views.prices = async () => {
   view.innerHTML = `<div class="toolbar"><div class="grow"></div><button class="btn" id="add">+ Add Price</button></div>
@@ -430,20 +511,26 @@ async function openJobReport(jobNo, target) {
   try {
     const d = await api.get('/api/report/job/' + encodeURIComponent(jobNo));
     const j = d.job, s = d.summary;
+    const unmatchedNote = s.labourUnmatchedHours ? ` <span class="badge open" title="Hours with no matching rate">${num(Math.round(s.labourUnmatchedHours))}h no rate</span>` : '';
     box.innerHTML = `
       <div class="stat-grid" style="margin-top:14px">
         <div class="stat"><div class="v">${esc(j.vehicle || '—')}</div><div class="l">Vehicle</div></div>
         <div class="stat"><div class="v">${money(s.materialCost) || 'Rs 0'}</div><div class="l">Material Cost</div></div>
-        <div class="stat"><div class="v">${num(Math.round(s.labourHours))}</div><div class="l">Labour Man-Hrs</div></div>
-        <div class="stat"><div class="v">${esc(j.site || '—')}</div><div class="l">Site</div></div>
+        <div class="stat"><div class="v">${money(s.labourCost) || 'Rs 0'}</div><div class="l">Labour Cost${unmatchedNote}</div></div>
+        <div class="stat" style="border-color:var(--accent)"><div class="v">${money(s.totalCost) || 'Rs 0'}</div><div class="l">Total Job Cost</div></div>
       </div>
-      <p class="muted">${esc(j.description || '')} · ${esc(j.start_date || '')} → ${esc(j.end_date || 'Open')}</p>
-      <h2 style="font-size:14px">Materials (${d.materials.length})</h2>
+      <p class="muted">${esc(j.description || '')} · ${esc(j.start_date || '')} → ${esc(j.end_date || 'Open')} · ${esc(j.site || '')} · ${num(Math.round(s.labourHours))} man-hrs</p>
+      <h2 style="font-size:14px">Labour Cost by Mechanic</h2>
+      ${renderTable([
+        { key: 'name', label: 'Mechanic', render: (v, r) => esc(v) + (r.matched ? '' : ' <span class="badge open">no rate</span>') },
+        { key: 'rate', label: 'Rate', render: money }, { key: 'hours', label: 'Hours', render: num }, { key: 'cost', label: 'Cost', render: money },
+      ], d.labour || [])}
+      <h2 style="font-size:14px;margin-top:18px">Materials (${d.materials.length})</h2>
       ${renderTable([
         { key: 'date', label: 'Date' }, { key: 'category', label: 'Cat' }, { key: 'description', label: 'Item' },
         { key: 'qty', label: 'Qty', render: num }, { key: 'unit_price', label: 'Unit', render: money }, { key: 'line_total', label: 'Total', render: money },
       ], d.materials)}
-      <h2 style="font-size:14px;margin-top:18px">Labour (${d.work.length})</h2>
+      <h2 style="font-size:14px;margin-top:18px">Work Log (${d.work.length})</h2>
       ${renderTable([
         { key: 'date', label: 'Date' }, { key: 'description', label: 'Work' }, { key: 'mechanic', label: 'Mechanic' }, { key: 'man_hours', label: 'Man-Hrs', render: num },
       ], d.work)}`;
@@ -471,7 +558,7 @@ async function openVehicle(reg) {
 }
 
 // ============================================================ router
-const TITLES = { dashboard: 'Dashboard', jobs: 'Jobs', fleet: 'Fleet', materials: 'Materials', worklog: 'Work Log', prices: 'Prices', reports: 'Reports' };
+const TITLES = { dashboard: 'Dashboard', jobs: 'Jobs', fleet: 'Fleet', materials: 'Materials', worklog: 'Work Log', labour: 'Labour Cost', prices: 'Prices', reports: 'Reports' };
 function setRoute(route) {
   if (!views[route]) route = 'dashboard';
   state.route = route; state.search = '';
