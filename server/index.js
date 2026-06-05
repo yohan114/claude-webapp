@@ -34,6 +34,41 @@ const JOB_MATCH = (t) => `(SELECT j.job_no FROM jobs j
 const PRICE_MATCH = (t) => `(SELECT p.current_price FROM prices p
   WHERE p.description = ${t}.description ORDER BY p.id DESC LIMIT 1)`;
 
+// ---------------------------------------------------------------- fuzzy price lookup
+// Build an in-memory price index once; refreshed by calling buildPriceIndex().
+let _priceIndex = null;
+const STOP_WORDS = new Set(['the','and','for','from','with','new','used','repair','set','no','of','in','a','an']);
+const tokenize = (s) => String(s||'').toLowerCase().replace(/[()[\]/\\]/g,' ').split(/[\s,.-]+/)
+  .map(t=>t.replace(/[^a-z0-9]/g,''))
+  .filter(t=>t.length>=2 && !STOP_WORDS.has(t));
+
+function buildPriceIndex() {
+  const rows = db.prepare('SELECT id, description, current_price FROM prices WHERE description IS NOT NULL AND current_price IS NOT NULL ORDER BY id DESC').all();
+  _priceIndex = rows.map(r=>({ ...r, tokens: new Set(tokenize(r.description)) }));
+}
+function lookupPrice(description) {
+  if (!_priceIndex) buildPriceIndex();
+  if (!description) return null;
+  // exact first
+  const exact = _priceIndex.find(r=>r.description===description);
+  if (exact) return { price: exact.current_price, matchType: 'exact', matched: exact.description };
+  // token overlap: score = shared tokens / max(len, len) — Jaccard-ish
+  const qTokens = new Set(tokenize(description));
+  if (!qTokens.size) return null;
+  let best=null, bestScore=0;
+  for (const r of _priceIndex) {
+    if (!r.tokens.size) continue;
+    let shared=0; for (const t of qTokens) if(r.tokens.has(t)) shared++;
+    const score = shared / Math.max(qTokens.size, r.tokens.size);
+    if (score>bestScore) { bestScore=score; best=r; }
+  }
+  // require at least 2 shared tokens when query has 3+ tokens (prevents vague single-word matches)
+  const sharedCount = [...qTokens].filter(t => best?.tokens.has(t)).length;
+  if (best && bestScore>=0.5 && (qTokens.size < 3 || sharedCount >= 2))
+    return { price: best.current_price, matchType: 'fuzzy', matched: best.description, score: Math.round(bestScore*100) };
+  return null;
+}
+
 // ---------------------------------------------------------------- labour
 const normName = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
 function lev(a, b) {
@@ -221,8 +256,7 @@ app.delete('/api/jobs/:id', (req, res) => {
 app.get('/api/materials', (req, res) => {
   try {
     const { q, category, used } = req.query;
-    let sql = `SELECT mi.*, ${JOB_MATCH('mi')} AS job_no, ${PRICE_MATCH('mi')} AS unit_price
-      FROM material_issues mi`;
+    let sql = `SELECT mi.*, ${JOB_MATCH('mi')} AS job_no FROM material_issues mi`;
     const params = [];
     const clauses = [];
     if (category) { clauses.push('mi.category = ?'); params.push(category); }
@@ -230,7 +264,12 @@ app.get('/api/materials', (req, res) => {
     if (clauses.length) sql += ' WHERE ' + clauses.join(' AND ');
     sql += ' ORDER BY mi.id DESC LIMIT 3000';
     let rows = db.prepare(sql).all(...params);
-    rows = rows.map((r) => ({ ...r, line_total: r.unit_price != null && r.qty != null ? r.unit_price * r.qty : null }));
+    rows = rows.map((r) => {
+      const pm = lookupPrice(r.description);
+      const unit_price = pm ? pm.price : null;
+      return { ...r, unit_price, price_match: pm ? pm.matchType : null, price_matched_desc: pm ? pm.matched : null,
+        line_total: unit_price != null && r.qty != null ? unit_price * r.qty : null };
+    });
     if (used === 'yes') rows = rows.filter((r) => r.job_no);
     if (used === 'no') rows = rows.filter((r) => !r.job_no);
     ok(res, rows);
@@ -389,6 +428,7 @@ app.post('/api/prices', (req, res) => {
       .run({ mrn: b.mrn || null, description: b.description || null, purchase_type: b.purchase_type || null, vehicle: b.vehicle || null,
         qty: b.qty ?? null, current_price: b.current_price ?? null, grn_no: b.grn_no || null, invoice_no: b.invoice_no || null,
         supplier: b.supplier || null, date: b.date || null });
+    invalidatePriceCache();
     ok(res, db.prepare('SELECT * FROM prices WHERE id = ?').get(info.lastInsertRowid));
   } catch (e) { fail(res, e); }
 });
@@ -401,12 +441,13 @@ app.put('/api/prices/:id', (req, res) => {
       .run({ id: req.params.id, mrn: b.mrn ?? null, description: b.description ?? null, purchase_type: b.purchase_type ?? null,
         vehicle: b.vehicle ?? null, qty: b.qty ?? null, current_price: b.current_price ?? null, grn_no: b.grn_no ?? null,
         invoice_no: b.invoice_no ?? null, supplier: b.supplier ?? null, date: b.date ?? null });
+    invalidatePriceCache();
     ok(res, db.prepare('SELECT * FROM prices WHERE id = ?').get(req.params.id));
   } catch (e) { fail(res, e); }
 });
 
 app.delete('/api/prices/:id', (req, res) => {
-  try { db.prepare('DELETE FROM prices WHERE id = ?').run(req.params.id); ok(res, { ok: true }); }
+  try { db.prepare('DELETE FROM prices WHERE id = ?').run(req.params.id); invalidatePriceCache(); ok(res, { ok: true }); }
   catch (e) { fail(res, e); }
 });
 
@@ -423,15 +464,13 @@ app.get('/api/report/job/:jobNo', (req, res) => {
     const materials = db.prepare(`SELECT * FROM material_issues
       WHERE vehicle = ? AND date IS NOT NULL AND date != '' AND date >= ? AND date <= ? ORDER BY date`).all(job.vehicle, start, end);
 
-    // price lookup by exact-ish description
-    const priceFor = db.prepare('SELECT current_price FROM prices WHERE description = ? ORDER BY id DESC LIMIT 1');
     let materialCost = 0;
     const pricedMaterials = materials.map((m) => {
-      const p = priceFor.get(m.description);
-      const unit = p ? p.current_price : null;
+      const pm = lookupPrice(m.description);
+      const unit = pm ? pm.price : null;
       const line = unit != null && m.qty != null ? unit * m.qty : null;
       if (line) materialCost += line;
-      return { ...m, unit_price: unit, line_total: line };
+      return { ...m, unit_price: unit, price_match: pm?.matchType || null, price_matched_desc: pm?.matched || null, line_total: line };
     });
 
     const work = db.prepare(`SELECT * FROM daily_work
@@ -472,6 +511,49 @@ app.get('/api/report/pending-mrn', (req, res) => {
       ORDER BY mi.date DESC LIMIT 1000`).all());
   } catch (e) { fail(res, e); }
 });
+
+// Vehicle lifetime cost: total spend per vehicle across all jobs in the DB
+app.get('/api/report/vehicle-lifetime', (req, res) => {
+  try {
+    const { q } = req.query;
+    const aliases = loadAliases();
+    // material cost per vehicle using fuzzy pricing
+    const allMaterials = db.prepare('SELECT vehicle, description, qty FROM material_issues WHERE vehicle IS NOT NULL AND vehicle != \'\'').all();
+    const matByVehicle = new Map();
+    for (const m of allMaterials) {
+      const pm = lookupPrice(m.description);
+      const cost = pm && m.qty ? pm.price * m.qty : 0;
+      const v = m.vehicle;
+      const cur = matByVehicle.get(v) || { matCost: 0, matRows: 0, priced: 0 };
+      cur.matCost += cost; cur.matRows++; if (pm) cur.priced++;
+      matByVehicle.set(v, cur);
+    }
+    // labour cost per vehicle
+    const allWork = db.prepare('SELECT vehicle, hours, mechanic FROM daily_work WHERE vehicle IS NOT NULL AND vehicle != \'\'').all();
+    const labByVehicle = new Map();
+    for (const w of allWork) {
+      const h = Number(w.hours) || 0; if (!h) continue;
+      let cost = 0;
+      for (const p of resolvePeople(w.mechanic, aliases)) cost += h * p.rate;
+      const v = w.vehicle;
+      const cur = labByVehicle.get(v) || { labCost: 0, labHours: 0 };
+      cur.labCost += cost; cur.labHours += h; labByVehicle.set(v, cur);
+    }
+    const vehicles = db.prepare('SELECT reg_no, description, brand, site FROM fleet WHERE reg_no IS NOT NULL').all();
+    const rows = vehicles.map((f) => {
+      const mc = matByVehicle.get(f.reg_no) || { matCost: 0, matRows: 0 };
+      const lc = labByVehicle.get(f.reg_no) || { labCost: 0, labHours: 0 };
+      return { vehicle: f.reg_no, description: f.description, brand: f.brand, site: f.site,
+        matCost: mc.matCost, labCost: lc.labCost, labHours: lc.labHours,
+        totalCost: mc.matCost + lc.labCost, matIssues: mc.matRows };
+    }).filter((r) => r.totalCost > 0);
+    rows.sort((a, b) => b.totalCost - a.totalCost);
+    const filtered = q ? rows.filter((r) => String(r.vehicle + r.description + r.site).toLowerCase().includes(q.toLowerCase())) : rows;
+    ok(res, filtered.slice(0, 200));
+  } catch (e) { fail(res, e); }
+});
+
+function invalidatePriceCache() { _priceIndex = null; }
 
 // ---------------------------------------------------------------- static
 app.use(express.static(join(__dirname, '..', 'client')));

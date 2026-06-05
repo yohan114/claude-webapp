@@ -250,7 +250,12 @@ views.materials = async () => {
     { key: 'mr_no', label: 'MR No' },
     { key: 'description', label: 'Description' },
     { key: 'qty', label: 'Qty', render: num },
-    { key: 'unit_price', label: 'Unit Price', render: money },
+    { key: 'unit_price', label: 'Unit Price', render: (v, r) => {
+      if (v == null) return '<span class="muted">—</span>';
+      const tag = r.price_match === 'fuzzy'
+        ? ` <span class="badge open" title="Fuzzy match: ${esc(r.price_matched_desc || '')}">~</span>` : '';
+      return money(v) + tag;
+    }},
     { key: 'line_total', label: 'Total', render: money },
     { key: 'vehicle', label: 'Vehicle', render: (v) => v ? `<span class="link" data-veh="${esc(v)}">${esc(v)}</span>` : '' },
     { key: 'job_no', label: 'Used in Job', render: (v) => v
@@ -484,6 +489,10 @@ views.reports = async () => {
     <div class="cols-2">
       <div class="panel"><h2>Monthly Labour Hours</h2><div id="labour" class="loading">Loading…</div></div>
       <div class="panel"><h2>Pending MRN / Tyre Requests</h2><div id="pending" class="loading">Loading…</div></div>
+    </div>
+    <div class="panel"><h2>Vehicle Lifetime Cost</h2>
+      <div class="toolbar"><input id="vehs" class="search" style="width:280px" placeholder="Filter vehicle…" /><div class="grow"></div></div>
+      <div id="vlt" class="loading">Loading…</div>
     </div>`;
   const run = () => { const j = view.querySelector('#jobno').value.trim(); if (j) openJobReport(j, view.querySelector('#jobreport')); };
   view.querySelector('#run').onclick = run;
@@ -499,6 +508,28 @@ views.reports = async () => {
       { key: 'date', label: 'Date' }, { key: 'mr_no', label: 'MR No' }, { key: 'description', label: 'Item' },
       { key: 'qty', label: 'Qty', render: num }, { key: 'vehicle', label: 'Vehicle' },
     ], rows.slice(0, 100)) + '</div>';
+  });
+
+  // Vehicle lifetime cost table
+  const vltCols = [
+    { key: 'vehicle', label: 'Vehicle', render: (v) => `<span class="link" data-veh="${esc(v)}">${esc(v)}</span>` },
+    { key: 'description', label: 'Equipment' }, { key: 'site', label: 'Site' },
+    { key: 'matCost', label: 'Material Cost', render: money }, { key: 'labCost', label: 'Labour Cost', render: money },
+    { key: 'totalCost', label: 'Total Cost', render: (v) => `<b>${money(v)}</b>` },
+    { key: 'labHours', label: 'Labour Hrs', render: (v) => num(Math.round(v)) },
+    { key: 'matIssues', label: 'Issues', render: num },
+  ];
+  let vltRows = [];
+  const drawVlt = () => {
+    const box = view.querySelector('#vlt'); if (!box) return;
+    box.outerHTML = '<div id="vlt">' + renderTable(vltCols, vltRows, { actions: false }) + '</div>';
+    view.querySelectorAll('[data-veh]').forEach((a) => a.onclick = () => openVehicle(a.dataset.veh));
+    attachSort(view.querySelector('#vlt'), vltCols, vltRows, drawVlt);
+  };
+  api.get('/api/report/vehicle-lifetime').then((rows) => { vltRows = rows; drawVlt(); });
+  view.querySelector('#vehs').addEventListener('input', async (e) => {
+    vltRows = await api.get('/api/report/vehicle-lifetime?q=' + encodeURIComponent(e.target.value));
+    drawVlt();
   });
 };
 
