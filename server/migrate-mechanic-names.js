@@ -24,13 +24,13 @@ const fixes = {
   // Nimesh
   'nimesh':'Nimesh',
   // Ruwan
-  'Rawan':'Ruwan','ruwan':'Ruwan',
+  'Rawan':'Ruwan','ruwan':'Ruwan','Nuwan':'Ruwan',
   // Saman (Samanpriya = full name of Saman)
   'saman':'Saman','Samanpriya':'Saman',
   // Seethananda/seetha
   'Seetha':'Seethananda/seetha','Seethananda':'Seethananda/seetha','Seethe':'Seethananda/seetha',
   // Theshan
-  '(Theshan)':'Theshan','Thashan':'Theshan','Theminda':'Theshan','theminda':'Theshan','theshan':'Theshan',
+  '(Theshan)':'Theshan','Thashan':'Theshan','Theminda':'Theshan','theminda':'Theshan','theshan':'Theshan','Heshan':'Theshan','Reshan':'Theshan',
   // Viboda
   'vibod':'Viboda','viboda':'Viboda','Vihanga':'Viboda','Vihaga':'Viboda',
   // Vinod
