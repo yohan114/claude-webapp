@@ -32,9 +32,9 @@ const fixes = {
   // Theshan
   '(Theshan)':'Theshan','Thashan':'Theshan','Theminda':'Theshan','theminda':'Theshan','theshan':'Theshan',
   // Viboda
-  'vibod':'Viboda','viboda':'Viboda',
+  'vibod':'Viboda','viboda':'Viboda','Vihanga':'Viboda','Vihaga':'Viboda',
   // Vinod
-  'Vinoth':'Vinod','Vined (E)':'Vinod','Vinod (CE)':'Vinod','Vinod (E)':'Vinod','vinod':'Vinod','vinoth':'Vinod',
+  'Vinoth':'Vinod','Vined (E)':'Vinod','Vinod (CE)':'Vinod','Vinod (E)':'Vinod','vinod':'Vinod','vinoth':'Vinod','Kinoth':'Vinod',
   // Vinod M
   'Vinod (M)':'Vinod M','Vinod e':'Vinod M',
   // Two-person compound cells (dot-separated → comma-separated)
